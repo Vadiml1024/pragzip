@@ -993,9 +993,7 @@ Block<CALCULATE_CRC32, ENABLE_STATISTICS>::read( BitReader& bitReader,
 
             if constexpr ( CALCULATE_CRC32 ) {
                 for ( const auto& buffer : result.data ) {
-                    for ( size_t i = 0; i < buffer.size(); ++i ) {
-                        m_crc32 = updateCRC32( m_crc32, buffer[i] );
-                    }
+                    m_crc32 = updateCRC32( m_crc32, buffer);
                 }
             }
 

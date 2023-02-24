@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <nmmintrin.h>
 
 
 namespace pragzip
@@ -33,6 +34,7 @@ static constexpr int CRC32_LOOKUP_TABLE_SIZE = 256;
 /* a small lookup table: raw data -> CRC32 value to speed up CRC calculation */
 alignas( 8 ) constexpr static CRC32LookupTable CRC32_TABLE = createCRC32LookupTable();
 
+
 [[nodiscard]] constexpr uint32_t
 updateCRC32( uint32_t crc,
              uint8_t  data ) noexcept
@@ -40,4 +42,17 @@ updateCRC32( uint32_t crc,
     const auto result = ( crc >> 8U ) ^ CRC32_TABLE[( crc ^ data ) & 0xFFU];
     return result;
 }
+
+
+uint32_t crc32_sse4(uint32_t crc, const void* _data, size_t length);
+
+
+
+template <typename T>
+inline uint32_t updateCRC32( uint32_t crc, T vec ) noexcept
+{
+    return crc32_sse4( crc, vec.data(), vec.size() );
+}
+
+
 }

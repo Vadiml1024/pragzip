@@ -1,11 +1,13 @@
 add_subdirectory(huffman)
 add_subdirectory(blockfinder)
 
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4.2")
 
 add_library(libpragzip INTERFACE)
 target_include_directories(libpragzip INTERFACE ${CMAKE_CURRENT_LIST_DIR})
 target_sources(libpragzip INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/crc32.hpp
+    ${CMAKE_CURRENT_LIST_DIR}/crc32.cpp
     ${CMAKE_CURRENT_LIST_DIR}/DecodedData.hpp
     ${CMAKE_CURRENT_LIST_DIR}/definitions.hpp
     ${CMAKE_CURRENT_LIST_DIR}/deflate.hpp
