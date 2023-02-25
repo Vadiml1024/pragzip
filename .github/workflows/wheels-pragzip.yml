@@ -2,7 +2,7 @@ name: Build Wheels for pragzip
 
 on:
   push:
-    branches: 'develop'
+    branches: 'master'
 
 jobs:
   Build-Wheels:
