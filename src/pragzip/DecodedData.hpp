@@ -97,7 +97,7 @@ public:
     };
 
 public:
-    void
+    virtual void
     append( DecodedVector&& toAppend )
     {
         if ( !toAppend.empty() ) {
@@ -106,7 +106,7 @@ public:
         }
     }
 
-    void
+    virtual void
     append( DecodedDataView const& buffers );
 
     [[nodiscard]] size_t
@@ -135,7 +135,18 @@ public:
         return dataSize() * sizeof( uint8_t ) + dataWithMarkersSize() * sizeof( uint16_t );
     }
 
-    void
+    /**
+     * This is used to determine whether it is necessary to call applyWindow.
+     * Testing for @ref dataWithMarkers.empty() is not sufficient because markers could be contained
+     * in other members for derived classes! In that case @ref containsMarkers will be overriden.
+     */
+    [[nodiscard]] virtual bool
+    containsMarkers() const noexcept
+    {
+        return !dataWithMarkers.empty();
+    }
+
+    virtual void
     applyWindow( WindowView const& window );
 
     /**
@@ -153,7 +164,7 @@ public:
      *        the window as it would be after this whole block.
      * @note Should only be called after @ref applyWindow because @p skipBytes larger than @ref dataSize will throw.
      */
-    [[nodiscard]] DecodedVector
+    [[nodiscard]] virtual DecodedVector
     getWindowAt( WindowView const& previousWindow,
                  size_t            skipBytes ) const;
 
@@ -169,7 +180,7 @@ public:
     }
 
     /**
-     * Check decoded blocks that account for possible markers whether they actually contain markers and if not so
+     * Check decoded blocks that account for possible markers whether they actually contain markers and, if not so,
      * convert and move them to actual decoded data.
      */
     void

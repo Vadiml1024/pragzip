@@ -26,6 +26,16 @@
 #include "licenses.cpp"
 
 
+struct Arguments
+{
+    unsigned int decoderParallelism{ 0 };
+    unsigned int chunkSize{ 4_Mi };
+    std::string indexLoadPath;
+    std::string indexSavePath;
+    bool verbose{ false };
+};
+
+
 void
 printHelp( const cxxopts::Options& options )
 {
@@ -61,6 +71,102 @@ getFilePath( cxxopts::ParseResult const& parsedArgs,
         }
     }
     return {};
+}
+
+
+template<typename Reader>
+void
+printIndexAnalytics( const Reader& reader )
+{
+    const auto offsets = reader->blockOffsets();
+    if ( offsets.size() <= 1 ) {
+        return;
+    }
+
+    Statistics<double> encodedOffsetSpacings;
+    Statistics<double> decodedOffsetSpacings;
+    for ( auto it = offsets.begin(), nit = std::next( offsets.begin() ); nit != offsets.end(); ++it, ++nit ) {
+        const auto& [encodedOffset, decodedOffset] = *it;
+        const auto& [nextEncodedOffset, nextDecodedOffset] = *nit;
+        if ( nextEncodedOffset - encodedOffset > 0 ) {
+            encodedOffsetSpacings.merge( static_cast<double>( nextEncodedOffset - encodedOffset ) / CHAR_BIT / 1e6 );
+            decodedOffsetSpacings.merge( static_cast<double>( nextDecodedOffset - decodedOffset ) / 1e6 );
+        }
+    }
+
+    std::cerr
+        << "[Seekpoints Index]\n"
+        << "    Encoded offset spacings: ( min: " << encodedOffsetSpacings.min << ", "
+        << encodedOffsetSpacings.formatAverageWithUncertainty()
+        << ", max: " << encodedOffsetSpacings.max << " ) MB\n"
+        << "    Decoded offset spacings: ( min: " << decodedOffsetSpacings.min << ", "
+        << decodedOffsetSpacings.formatAverageWithUncertainty()
+        << ", max: " << decodedOffsetSpacings.max << " ) MB\n";
+}
+
+
+template<typename Reader,
+         typename WriteFunctor>
+size_t
+decompressParallel( const Reader&       reader,
+                    const std::string&  indexLoadPath,
+                    const std::string&  indexSavePath,
+                    const WriteFunctor& writeFunctor,
+                    const bool          verbose )
+{
+    if ( !indexLoadPath.empty() ) {
+        reader->setBlockOffsets( readGzipIndex( std::make_unique<StandardFileReader>( indexLoadPath ) ) );
+
+        if ( verbose && ( !indexSavePath.empty() || !indexLoadPath.empty() ) ) {
+            printIndexAnalytics( reader );
+        }
+    }
+
+    const auto totalBytesRead = reader->read( writeFunctor );
+
+    if ( !indexSavePath.empty() ) {
+        const auto file = throwingOpen( indexSavePath, "wb" );
+
+        const auto checkedWrite =
+            [&file] ( const void* buffer, size_t size )
+            {
+                if ( std::fwrite( buffer, 1, size, file.get() ) != size ) {
+                    throw std::runtime_error( "Failed to write data to index!" );
+                }
+            };
+
+        writeGzipIndex( reader->gzipIndex(), checkedWrite );
+    }
+
+    if ( verbose && indexLoadPath.empty() && !indexSavePath.empty() ) {
+        printIndexAnalytics( reader );
+    }
+
+    return totalBytesRead;
+}
+
+
+/**
+ * Dispatch to the appropriate ParallelGzipReader template arguments based on @p verbose.
+ */
+template<typename ChunkData,
+         typename WriteFunctor = std::function<void ( const std::shared_ptr<ChunkData>&, size_t, size_t )> >
+size_t
+decompressParallel( const Arguments&            args,
+                    std::unique_ptr<FileReader> inputFile,
+                    const WriteFunctor&         writeFunctor )
+{
+    if ( args.verbose ) {
+        using Reader = pragzip::ParallelGzipReader<ChunkData, /* enable statistics */ true, /* show profile */ true>;
+        return decompressParallel(
+            std::make_unique<Reader>( std::move( inputFile ), args.decoderParallelism, args.chunkSize ),
+            args.indexLoadPath, args.indexSavePath, writeFunctor, args.verbose );
+    } else {
+        using Reader = pragzip::ParallelGzipReader<ChunkData, /* enable statistics */ false, /* show profile */ false>;
+        return decompressParallel(
+            std::make_unique<Reader>( std::move( inputFile ), args.decoderParallelism, args.chunkSize ),
+            args.indexLoadPath, args.indexSavePath, writeFunctor, args.verbose );
+    }
 }
 
 
@@ -121,14 +227,17 @@ pragzipCLI( int argc, char** argv )
 
     const auto parsedArgs = options.parse( argc, argv );
 
-    const auto force   = parsedArgs["force"  ].as<bool>();
-    const auto quiet   = parsedArgs["quiet"  ].as<bool>();
-    const auto verbose = parsedArgs["verbose"].as<bool>();
+    /* Cleaned, checked, and typed arguments. */
+    Arguments args;
+
+    const auto force = parsedArgs["force"].as<bool>();
+    const auto quiet = parsedArgs["quiet"].as<bool>();
+    args.verbose = parsedArgs["verbose"].as<bool>();
 
     const auto getParallelism = [] ( const auto p ) { return p > 0 ? p : availableCores(); };
-    const auto decoderParallelism = getParallelism( parsedArgs["decoder-parallelism"].as<unsigned int>() );
+    args.decoderParallelism = getParallelism( parsedArgs["decoder-parallelism"].as<unsigned int>() );
 
-    if ( verbose ) {
+    if ( args.verbose ) {
         for ( auto const* const path : { "input", "output" } ) {
             std::string value = "<none>";
             try {
@@ -214,19 +323,19 @@ pragzipCLI( int argc, char** argv )
         return 1;
     }
 
-    const auto indexLoadPath = parsedArgs.count( "import-index" ) > 0
-                               ? parsedArgs["import-index"].as<std::string>()
-                               : std::string();
-    const auto indexSavePath = parsedArgs.count( "export-index" ) > 0
-                               ? parsedArgs["export-index"].as<std::string>()
-                               : std::string();
-    if ( !indexLoadPath.empty() && !indexSavePath.empty() ) {
+    args.indexLoadPath = parsedArgs.count( "import-index" ) > 0
+                         ? parsedArgs["import-index"].as<std::string>()
+                         : std::string();
+    args.indexSavePath = parsedArgs.count( "export-index" ) > 0
+                         ? parsedArgs["export-index"].as<std::string>()
+                         : std::string();
+    if ( !args.indexLoadPath.empty() && !args.indexSavePath.empty() ) {
         std::cerr << "[Warning] Importing and exporting an index makes limited sense.\n";
     }
-    if ( ( !indexLoadPath.empty() || !indexSavePath.empty() ) && ( decoderParallelism == 1 ) ) {
+    if ( ( !args.indexLoadPath.empty() || !args.indexSavePath.empty() ) && ( args.decoderParallelism == 1 ) ) {
         std::cerr << "[Warning] The index only has an effect for parallel decoding.\n";
     }
-    if ( !indexLoadPath.empty() && !fileExists( indexLoadPath ) ) {
+    if ( !args.indexLoadPath.empty() && !fileExists( args.indexLoadPath ) ) {
         std::cerr << "The index to import was not found!\n";
         return 1;
     }
@@ -234,7 +343,7 @@ pragzipCLI( int argc, char** argv )
     /* Actually do things as requested. */
 
     if ( decompress || countBytes || countLines ) {
-        if ( decompress && verbose ) {
+        if ( decompress && args.verbose ) {
             std::cerr << "Decompress " << ( inputFilePath.empty() ? "<stdin>" : inputFilePath.c_str() )
                       << " -> " << ( outputFilePath.empty() ? "<stdout>" : outputFilePath.c_str() ) << "\n";
         }
@@ -250,48 +359,12 @@ pragzipCLI( int argc, char** argv )
         }
         const auto outputFileDescriptor = m_outputFile ? m_outputFile->fd() : -1;
 
-        const auto printIndexAnalytics =
-            [&] ( const auto& reader )
-            {
-                if ( !verbose || ( indexSavePath.empty() && indexLoadPath.empty() ) ) {
-                    return;
-                }
-
-                const auto offsets = reader->blockOffsets();
-                if ( offsets.size() <= 1 ) {
-                    return;
-                }
-
-                Statistics<double> encodedOffsetSpacings;
-                Statistics<double> decodedOffsetSpacings;
-                for ( auto it = offsets.begin(), nit = std::next( offsets.begin() );
-                      nit != offsets.end(); ++it, ++nit ) {
-                    const auto& [encodedOffset, decodedOffset] = *it;
-                    const auto& [nextEncodedOffset, nextDecodedOffset] = *nit;
-                    if ( nextEncodedOffset - encodedOffset > 0 ) {
-                        encodedOffsetSpacings.merge( static_cast<double>( nextEncodedOffset - encodedOffset )
-                                                     / CHAR_BIT / 1e6 );
-                        decodedOffsetSpacings.merge( static_cast<double>( nextDecodedOffset - decodedOffset )
-                                                     / 1e6 );
-                    }
-                }
-
-                std::cerr
-                    << "[Seekpoints Index]\n"
-                    << "    Encoded offset spacings: ( min: " << encodedOffsetSpacings.min << ", "
-                    << encodedOffsetSpacings.formatAverageWithUncertainty()
-                    << ", max: " << encodedOffsetSpacings.max << " ) MB\n"
-                    << "    Decoded offset spacings: ( min: " << decodedOffsetSpacings.min << ", "
-                    << decodedOffsetSpacings.formatAverageWithUncertainty()
-                    << ", max: " << decodedOffsetSpacings.max << " ) MB\n";
-            };
-
         uint64_t newlineCount{ 0 };
 
         const auto t0 = now();
 
         size_t totalBytesRead{ 0 };
-        if ( decoderParallelism == 1 ) {
+        if ( args.decoderParallelism == 1 ) {
             const auto writeAndCount =
                 [outputFileDescriptor, countLines, &newlineCount]
                 ( const void* const buffer,
@@ -327,51 +400,17 @@ pragzipCLI( int argc, char** argv )
                     }
                 };
 
-            const auto chunkSize = parsedArgs["chunk-size"].as<unsigned int>();
+            args.chunkSize = parsedArgs["chunk-size"].as<unsigned int>() * 1_Ki;
 
-            const auto decompressParallel =
-                [&] ( const auto& reader )
-                {
-                    if ( !indexLoadPath.empty() ) {
-                        reader->setBlockOffsets(
-                            readGzipIndex( std::make_unique<StandardFileReader>( indexLoadPath ) ) );
-                        printIndexAnalytics( reader );
-                    }
+            if ( ( outputFileDescriptor == -1 ) && args.indexSavePath.empty() && countBytes ) {
+                /* Need to do nothing with the chunks because decompressParallel returns the decompressed size. */
+                const auto doNothing = [] ( const auto&, size_t, size_t ) {};
 
-                    totalBytesRead = reader->read( writeAndCount );
-
-                    if ( !indexSavePath.empty() ) {
-                        const auto file = throwingOpen( indexSavePath, "wb" );
-
-                        const auto checkedWrite =
-                            [&file] ( const void* buffer, size_t size )
-                            {
-                                if ( std::fwrite( buffer, 1, size, file.get() ) != size ) {
-                                    throw std::runtime_error( "Failed to write data to index!" );
-                                }
-                            };
-
-                        writeGzipIndex( reader->gzipIndex(), checkedWrite );
-                    }
-
-                    if ( indexLoadPath.empty() ) {
-                        printIndexAnalytics( reader );
-                    }
-                };
-
-
-            if ( verbose ) {
-                using GzipReader = pragzip::ParallelGzipReader</* enable statistics */ true, /* show profile */ true>;
-                auto reader = std::make_unique<GzipReader>( std::move( inputFile ), decoderParallelism,
-                                                            chunkSize * 1024 );
-                decompressParallel( std::move( reader ) );
+                totalBytesRead = decompressParallel<pragzip::ChunkDataCounter>(
+                    args, std::move( inputFile ), doNothing );
             } else {
-                using GzipReader = pragzip::ParallelGzipReader</* enable statistics */ false, /* show profile */ false>;
-                auto reader = std::make_unique<GzipReader>( std::move( inputFile ), decoderParallelism,
-                                                            chunkSize * 1024 );
-                decompressParallel( std::move( reader ) );
+                totalBytesRead = decompressParallel<pragzip::ChunkData>( args, std::move( inputFile ), writeAndCount );
             }
-
         }
 
         const auto writeToStdErr = m_outputFile && m_outputFile->writingToStdout();

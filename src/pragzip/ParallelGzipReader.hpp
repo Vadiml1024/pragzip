@@ -35,12 +35,14 @@ namespace pragzip
 /**
  * @note Calls to this class are not thread-safe! Even though they use threads to evaluate them in parallel.
  */
-template<bool ENABLE_STATISTICS = false,
+template<typename T_ChunkData = ChunkData,
+         bool ENABLE_STATISTICS = false,
          bool SHOW_PROFILE = false>
 class ParallelGzipReader final :
     public FileReader
 {
 public:
+    using ChunkData = T_ChunkData;
     /**
      * The fetching strategy should support parallelization via prefetching for sequential accesses while
      * avoiding a lot of useless prefetches for random or multi-stream sequential accesses like those occuring
@@ -49,7 +51,8 @@ public:
      * because the prefetch and cache units are very large and striding or backward accessing over multiple
      * megabytes should be extremely rare.
      */
-    using ChunkFetcher = pragzip::GzipChunkFetcher<FetchingStrategy::FetchMultiStream, ENABLE_STATISTICS, SHOW_PROFILE>;
+    using ChunkFetcher = pragzip::GzipChunkFetcher<FetchingStrategy::FetchMultiStream, ChunkData,
+                                                   ENABLE_STATISTICS, SHOW_PROFILE>;
     using BlockFinder = typename ChunkFetcher::BlockFinder;
     using BitReader = pragzip::BitReader;
     using WriteFunctor = std::function<void ( const std::shared_ptr<ChunkData>&, size_t, size_t )>;
@@ -380,7 +383,7 @@ public:
             }
             const auto& [blockInfo, chunkData] = *blockResult;
 
-            if ( !chunkData->dataWithMarkers.empty() ) {
+            if ( chunkData->containsMarkers() ) {
                 throw std::logic_error( "Did not expect to get results with markers!" );
             }
 
@@ -398,10 +401,6 @@ public:
                         << ", block data size: " << formatBytes( chunkData->decodedSizeInBytes )
                         << " markers: " << chunkData->dataWithMarkersSize();
                 throw std::logic_error( std::move( message ).str() );
-            }
-
-            if ( chunkData->data.empty() ) {
-                throw std::logic_error( "Did not expect empty block. Cannot proceed!" );
             }
 
         #ifdef WITH_PYTHON_SUPPORT
@@ -784,7 +783,4 @@ private:
     std::shared_ptr<WindowMap> const m_windowMap{ std::make_shared<WindowMap>() };
     std::unique_ptr<ChunkFetcher>    m_chunkFetcher;
 };
-
-
-using ParallelGzipReaderWithDebugOutput = ParallelGzipReader<true, true>;
 }  // namespace pragzip

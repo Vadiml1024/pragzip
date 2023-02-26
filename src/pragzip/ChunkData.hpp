@@ -19,6 +19,19 @@ namespace pragzip
  * gzip streams. It is used to hold the chunk data for parallel decompression.
  * It also adds some further metadata like deflate block and stream boundaries and helpers for creating
  * evenly distributed checkpoints for a gzip seek index.
+ *
+ * Specialized use cases can optimize memory usage or add post-processing steps by overriding the two
+ * @ref append methods, @ref applyWindow, and @ref finalize. The overriden method in the base class has
+ * to be called from the overriden methods in order to keep default functionality but it can also be
+ * knowingly omitted, e.g., for only counting bytes instead of appending them.
+ *
+ * - @ref append is called by @ref GzipChunkFetcher after each deflate::Block call back, which could be
+ *   every block or up to maximum 32 KiB of decompressed data.
+ * - @ref finalize is callied after the first stage of the two-staged decompression has finished.
+ *   At this point, the number of elements in the chunk is finalized. The size is not as 16-bit
+ *   wide markers are replaced with 8-bit bytes.
+ * - @ref applyWindow is called in the second stage and the ChunkData will hold the fully decompressed
+ *   data after after this call.
  */
 struct ChunkData :
     public deflate::DecodedData
@@ -58,7 +71,7 @@ struct ChunkData :
 
 public:
     [[nodiscard]] bool
-    matchesEncodedOffset( size_t offset )
+    matchesEncodedOffset( size_t offset ) const noexcept
     {
         if ( maxEncodedOffsetInBits == std::numeric_limits<size_t>::max() ) {
             return offset == encodedOffsetInBits;
@@ -72,7 +85,7 @@ public:
     [[nodiscard]] std::vector<Subblock>
     split( [[maybe_unused]] const size_t spacing ) const;
 
-    void
+    virtual void
     finalize( size_t blockEndOffsetInBits )
     {
         cleanUnmarkedData();
@@ -86,6 +99,27 @@ public:
     [[nodiscard]] constexpr size_t
     dataSize() const noexcept = delete;
 
+    void
+    appendFooter( const size_t encodedOffset,
+                  const size_t decodedOffset )
+    {
+        blockBoundaries.emplace_back( BlockBoundary{ encodedOffset, decodedOffset } );
+    }
+
+    /**
+     * Appends gzip footer information at the given offset.
+     */
+    void
+    appendFooter( const size_t encodedOffset,
+                  const size_t decodedOffset,
+                  gzip::Footer footer )
+    {
+        typename ChunkData::Footer footerResult;
+        footerResult.blockBoundary = { encodedOffset, decodedOffset };
+        footerResult.gzipFooter = footer;
+        footers.emplace_back( footerResult );
+    }
+
 public:
     /* This should only be evaluated when it is unequal std::numeric_limits<size_t>::max() and unequal
      * Base::encodedOffsetInBits. Then, [Base::encodedOffsetInBits, maxEncodedOffsetInBits] specifies a valid range
@@ -94,7 +128,7 @@ public:
     size_t maxEncodedOffsetInBits{ std::numeric_limits<size_t>::max() };
     /* Initialized with size() after thread has finished writing into ChunkData. Redundant but avoids a lock
      * because the marker replacement will momentarily lead to different results returned by size! */
-    size_t decodedSizeInBytes{ std::numeric_limits<size_t>::max() };
+    size_t decodedSizeInBytes{ 0 };
 
     /* Decoded offsets are relative to the decoded offset of this ChunkData because that might not be known
      * during first-pass decompression. */
@@ -275,4 +309,43 @@ writeAll( const std::shared_ptr<ChunkData>& chunkData,
     }
 #endif
 }
+
+
+/**
+ * This subclass of @ref ChunkData only counts the decompressed bytes and does not store them.
+ */
+struct ChunkDataCounter :
+    public ChunkData
+{
+    void
+    append( deflate::DecodedVector&& toAppend ) override
+    {
+        decodedSizeInBytes += toAppend.size();
+    }
+
+    void
+    append( deflate::DecodedDataView const& toAppend ) override
+    {
+        decodedSizeInBytes += toAppend.size();
+    }
+
+    void
+    finalize( size_t blockEndOffsetInBits ) override
+    {
+        encodedSizeInBits = blockEndOffsetInBits - encodedOffsetInBits;
+        /* Do not overwrite decodedSizeInBytes like is done in the base class
+         * because DecodedData::size() would return 0! Instead, it is updated inside append. */
+    }
+
+    /**
+     * The internal index will only contain the offsets and empty windows but that is fine because
+     * this subclass does never require windows. The index should not be exported when this is used.
+     */
+    [[nodiscard]] deflate::DecodedVector
+    getWindowAt( WindowView const& /* previousWindow */,
+                 size_t            /* skipBytes */ ) const override
+    {
+        return {};
+    }
+};
 }  // namespace pragzip
