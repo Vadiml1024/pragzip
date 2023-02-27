@@ -187,6 +187,71 @@ benchmarkCRC32( const std::vector<char>&                                   data,
 }
 
 
+/**
+ * @return a(x) multiplied by b(x) modulo p(x), where p(x) is the CRC polynomial,
+ * reflected. For speed, this requires that @p a not be zero.
+ */
+[[nodiscard]] constexpr uint32_t
+multmodp( uint32_t a,
+          uint32_t b)
+{
+    auto m = uint32_t( 1 ) << 31U;
+    uint32_t p = 0;
+    while ( true ) {
+        if (a & m) {
+            p ^= b;
+            if ((a & (m - 1)) == 0) {
+                break;
+            }
+        }
+        m >>= 1U;
+        b = b & 1U ? (b >> 1U) ^ 0xEDB88320UL : b >> 1U;
+    }
+    return p;
+}
+
+
+static constexpr std::array<uint32_t, 32> X2N_LUT =
+    [] ()
+    {
+        std::array<uint32_t, 32> result{};
+        /* initialize the x^2^n mod p(x) table */
+        auto p = uint32_t( 1 ) << 30U;
+        result[0] = p;
+        for ( size_t n = 1; n < 32; ++n ) {
+            result[n] = p = multmodp(p, p);
+        }
+        return result;
+    }();
+
+
+/**
+ * Return x^(n * 2^k) modulo p(x). Requires that x2n_table[] has been initialized.
+ */
+[[nodiscard]] constexpr uint32_t
+x2nmodp(size_t       n,
+        unsigned int k)
+{
+    auto p = (uint32_t)1 << 31;           /* x^0 == 1 */
+    while (n) {
+        if (n & 1) {
+            p = multmodp(X2N_LUT[k & 31], p);
+        }
+        n >>= 1;
+        k++;
+    }
+    return p;
+}
+
+uint32_t
+crc32_combine64( uint32_t crc1,
+                 uint32_t crc2,
+                 size_t   len2 )
+{
+    return multmodp( x2nmodp( len2, 3 ), crc1 ) ^ ( crc2 & 0xFFFF'FFFFU );
+}
+
+
 int
 main()
 {
