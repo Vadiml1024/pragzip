@@ -402,12 +402,23 @@ pragzipCLI( int argc, char** argv )
 
             args.chunkSize = parsedArgs["chunk-size"].as<unsigned int>() * 1_Ki;
 
-            if ( ( outputFileDescriptor == -1 ) && args.indexSavePath.empty() && countBytes ) {
-                /* Need to do nothing with the chunks because decompressParallel returns the decompressed size. */
-                const auto doNothing = [] ( const auto&, size_t, size_t ) {};
+            if ( ( outputFileDescriptor == -1 ) && args.indexSavePath.empty() ) {
+                if ( countLines ) {
+                    const auto accumulateLineCount =
+                        [&newlineCount] ( const auto& chunkData, size_t, size_t )
+                        {
+                            newlineCount += chunkData->newlines;
+                        };
 
-                totalBytesRead = decompressParallel<pragzip::ChunkDataCounter>(
-                    args, std::move( inputFile ), doNothing );
+                    totalBytesRead = decompressParallel<pragzip::ChunkDataLineCounter>(
+                        args, std::move( inputFile ), accumulateLineCount );
+                } else {
+                    /* Need to do nothing with the chunks because decompressParallel returns the decompressed size. */
+                    const auto doNothing = [] ( const auto&, size_t, size_t ) {};
+
+                    totalBytesRead = decompressParallel<pragzip::ChunkDataCounter>(
+                        args, std::move( inputFile ), doNothing );
+                }
             } else {
                 totalBytesRead = decompressParallel<pragzip::ChunkData>( args, std::move( inputFile ), writeAndCount );
             }
