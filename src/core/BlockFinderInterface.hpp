@@ -17,6 +17,9 @@ public:
     };
 
 public:
+    virtual
+    ~BlockFinderInterface() = default;
+
     [[nodiscard]] virtual size_t
     size() const = 0;
 

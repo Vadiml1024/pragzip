@@ -97,6 +97,9 @@ public:
     };
 
 public:
+    virtual
+    ~DecodedData() = default;
+
     virtual void
     append( DecodedVector&& toAppend )
     {
